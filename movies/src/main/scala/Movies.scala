@@ -1,65 +1,19 @@
 import org.apache.spark.sql.{SaveMode, SparkSession}
 import org.apache.spark.sql.functions._
 import org.apache.spark.sql.{Column, Encoders}
+import org.apache.spark.sql.{Dataset, Row}
+import org.apache.spark.sql.types.{StructType}
 import java.sql.Date
 
-object Movies {
-  def main(args: Array[String]) {
-    dataframes()
-    /datasets()
-    rdds()
-  }
+object Movies extends App {
+  // "hdfs://localhost:9000/user/shreevari_sp/imdb-movies.csv"
+  val source = args(0)
 
-  def dataframes() {
-    val spark = SparkSession
-      .builder()
-      .appName("assignment-3 dataframes")
-      .getOrCreate()
-
-    val source = "hdfs://localhost:9000/user/shreevari_sp/imdb-movies.csv"
-    val moviesDF = spark.read
-      .option("header", "true")
-      .option("sep", "\t")
-      .option("nullValue", "")
-      .option("inferSchema", "true")
-      .csv(source)
-
-    val parsedMoviesDF = moviesDF
-      .withColumn(
-        "cleaned_budget",
-        regexp_extract(col("budget"), "([0-9]+)", 1)
-      )
-      .drop("budget")
-      .withColumnRenamed("cleaned_budget", "budget")
-      .withColumn("date", to_date(col("date_published"), "yyyy-MM-dd"))
-      .drop("date_published")
-      .withColumnRenamed("date", "date_published")
-
-    val lang = "English"
-    val first = parsedMoviesDF
-      .select("title", "year")
-      .where(col("language") === lang)
-      .groupBy("year")
-      .count()
-
-    val second = parsedMoviesDF
-      .select("title", "votes", "year")
-      .groupBy("year")
-      .max("votes")
-
-    val minYear = 2000
-    val maxYear = 2010
-    val third = parsedMoviesDF
-      .filter(col("year") > minYear && col("year") < maxYear)
-      .groupBy("director")
-      .sum("votes")
-
-    first.show()
-    second.show()
-    third.show()
-
-    spark.close()
-  }
+  implicit val assignmentParams = (args(2), args(3).toInt, args(4).toInt)
+  val outputFormat = args(1)
+  dataframes(source, outputFormat)
+  datasets(source, outputFormat)
+  rdds(source, outputFormat)
 
   case class MovieType(
       imdb_title_id: String,
@@ -86,34 +40,111 @@ object Movies {
       reviews_from_critics: Option[Int]
   )
 
-  def datasets() {
-    val spark = SparkSession
+  def sparkSession = (sessionName: String) => {
+    SparkSession
       .builder()
-      .appName("assignment-3 datasets")
+      .appName(sessionName)
       .getOrCreate()
+  }
 
-    val source = "hdfs://localhost:9000/user/shreevari_sp/imdb-movies.csv"
+  def readDF(
+      spark: SparkSession,
+      format: String,
+      options: Map[String, String],
+      schema: Option[StructType] = None
+  ): Dataset[Row] = {
+    val readerWithOpts = spark.read
+      .options(options)
+      .format(format)
+    schema match {
+      case Some(v) => readerWithOpts.schema(v).load()
+      case None    => readerWithOpts.option("inferSchema", "true").load()
+    }
+  }
 
+  def readMoviesDF(spark: SparkSession, source: String) = {
     val movieSchema = Encoders.product[MovieType].schema
 
-    val moviesDF = spark.read
-      .option("header", "true")
-      .option("sep", "\t")
-      .option("nullValue", "")
-      .schema(movieSchema)
-      .csv(source)
+    val csvOpts = Map(("header", "true"), ("sep", "\t"), ("nullValue", ""))
+    val jsonOpts = Map[String, String]()
 
-    def cleanBudget(budgetString: String) =
-      "[0-9]+".r.findFirstIn(budgetString) match {
-        case Some(value) => value.toLong
-        case None        => 0
-      }
+    val fileExt = source.split('.').last
+
+    val formatOpts = fileExt match {
+      case "csv"  => csvOpts
+      case "json" => jsonOpts
+    }
+    val opts = formatOpts + ("path" -> source)
+    readDF(spark, fileExt, opts, Some(movieSchema))
+  }
+
+  def writeOutput[T](dataset: Dataset[T], location: String) =
+    dataset.write
+      .format(outputFormat)
+      .mode(SaveMode.Overwrite)
+      .save(location)
+
+  def dataframes(
+      source: String, outputFormat: String
+  )(implicit assignmentParams: Tuple3[String, Int, Int]) {
+    val assignmentPostfix = "dataframes"
+    val spark = sparkSession("assignment-3 dataframes")
+
+    val moviesDF = readMoviesDF(spark, source)
+
+    val parsedMoviesDF = moviesDF
+      .withColumn(
+        "cleaned_budget",
+        regexp_extract(col("budget"), "([0-9]+)", 1)
+      )
+      .drop("budget")
+      .withColumnRenamed("cleaned_budget", "budget")
+
+    val (lang, minYear, maxYear) = assignmentParams
+    val first = parsedMoviesDF
+      .select("title", "year")
+      .where(col("language") === lang)
+      .groupBy("year")
+      .count()
+
+    val second = parsedMoviesDF
+      .select("title", "votes", "year")
+      .groupBy("year")
+      .max("votes")
+
+    val third = parsedMoviesDF
+      .filter(col("year") > minYear && col("year") < maxYear)
+      .groupBy("director")
+      .sum("votes")
+
+    first.show()
+    writeOutput(first, s"$source.$assignmentPostfix.first")
+    second.show()
+    writeOutput(second, s"$source.$assignmentPostfix.second")
+    third.show()
+    writeOutput(third, s"$source.$assignmentPostfix.third")
+    spark.close()
+  }
+
+  def cleanBudget(budgetString: String) =
+    "[0-9]+".r.findFirstIn(budgetString) match {
+      case Some(value) => value.toLong
+      case None        => 0
+    }
+
+  def datasets(
+      source: String, outputFormat: String
+  )(implicit assignmentParams: Tuple3[String, Int, Int]) {
+    val assignmentPostfix = "datasets"
+    val spark = sparkSession("assignment-3 datasets")
+    val moviesDF = readMoviesDF(spark, source)
+
     import spark.implicits._
     val moviesDS = moviesDF.as[MovieType]
 
-    moviesDS.map(movie => cleanBudget(movie.budget.getOrElse("0"))).show()
+    // moviesDS.map(movie => cleanBudget(movie.budget.getOrElse("0"))).show()
 
-    val lang = "English"
+    val (lang, minYear, maxYear) = assignmentParams
     val first = moviesDS
       .filter(movie => movie.language.getOrElse("") == lang)
       .groupByKey(movie => movie.year.getOrElse(0))
@@ -129,8 +160,6 @@ object Movies {
         (movie._1, movie._2.title.getOrElse(""), movie._2.votes.getOrElse(0))
       )
 
-    val minYear = 2000
-    val maxYear = 2010
     val third = moviesDS
       .filter(movie =>
         movie.year.getOrElse(0) > minYear && movie.year.getOrElse(0) < maxYear
@@ -146,40 +175,28 @@ object Movies {
       )
 
     first.show()
+    writeOutput(first, s"$source.$assignmentPostfix.first")
     second.show()
+    writeOutput(second, s"$source.$assignmentPostfix.second")
     third.show()
-
+    writeOutput(third, s"$source.$assignmentPostfix.third")
+ 
     spark.close()
   }
-  def rdds() {
-    val spark = SparkSession
-      .builder()
-      .appName("assignment-3 rdds")
-      .getOrCreate()
+  def rdds(
+      source: String, outputFormat: String
+  )(implicit assignmentParams: Tuple3[String, Int, Int]) {
+    val assignmentPostfix = "rdds"
+    val spark = sparkSession("assignment-3 rdds")
+    val moviesDF = readMoviesDF(spark, source)
 
-    val source = "hdfs://localhost:9000/user/shreevari_sp/imdb-movies.csv"
-
-    val movieSchema = Encoders.product[MovieType].schema
-
-    val moviesDF = spark.read
-      .option("header", "true")
-      .option("sep", "\t")
-      .option("nullValue", "")
-      .schema(movieSchema)
-      .csv(source)
-
-    def cleanBudget(budgetString: String) =
-      "[0-9]+".r.findFirstIn(budgetString) match {
-        case Some(value) => value.toLong
-        case None        => 0
-      }
     import spark.implicits._
     val moviesDS = moviesDF.as[MovieType]
 
     // moviesDS.map(movie => cleanBudget(movie.budget.getOrElse("0"))).show()
     val moviesRDD = moviesDS.rdd
 
-    val lang = "English"
+    val (lang, minYear, maxYear) = assignmentParams
     val first = moviesRDD
       .filter(movie => movie.language.getOrElse("") == lang)
       .groupBy(movie => movie.year.getOrElse(0))
@@ -191,8 +208,6 @@ object Movies {
         (moviesByYear._1, moviesByYear._2.maxBy(movie => movie.votes))
       )
 
-    val minYear = 2000
-    val maxYear = 2010
     val third = moviesRDD
       .filter(movie =>
         movie.year.getOrElse(0) > minYear && movie.year.getOrElse(0) < maxYear
@@ -208,8 +223,11 @@ object Movies {
       )
 
     first.toDS.show()
+    writeOutput(first.toDS, s"$source.$assignmentPostfix.first")
     second.toDS.show()
+    writeOutput(second.toDS, s"$source.$assignmentPostfix.second")
     third.toDS.show()
+    writeOutput(third.toDS, s"$source.$assignmentPostfix.third")
 
     spark.close()
   }
